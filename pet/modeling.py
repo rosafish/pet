@@ -69,6 +69,7 @@ class PetConfig(ABC):
 class TrainConfig(PetConfig):
     """Configuration for training a model."""
 
+
     def __init__(
         self,
         device: str = None,
@@ -87,6 +88,8 @@ class TrainConfig(PetConfig):
         use_logits: bool = False,
         alpha: float = 0.9999,
         temperature: float = 1,
+        sc_eval_during_train=False, 
+        sc_eval_steps=None
     ):
         """
         Create a new training config.
@@ -124,6 +127,8 @@ class TrainConfig(PetConfig):
         self.use_logits = use_logits
         self.alpha = alpha
         self.temperature = temperature
+        self.sc_eval_during_train=sc_eval_during_train
+        self.sc_eval_steps=sc_eval_steps
 
 
 class EvalConfig(PetConfig):
@@ -559,6 +564,7 @@ def train_pet_ensemble(
 
                 logger.info("Train single model ... (one repetition)")
                 logger.info("Time: {}".format(time.ctime()))
+
                 results_dict.update(
                     train_single_model(
                         wrapper,
@@ -568,7 +574,8 @@ def train_pet_ensemble(
                         ipet_train_data=ipet_train_data,
                         unlabeled_data=unlabeled_data,
                         pattern_iter_output_dir=pattern_iter_output_dir,
-                        return_train_set_logits=save_train_logits
+                        return_train_set_logits=save_train_logits,
+                        eval_data=eval_data
                     )
                 )
 
@@ -577,27 +584,6 @@ def train_pet_ensemble(
                     save_logits(
                         os.path.join(pattern_iter_output_dir, "train_logits.txt"), results_dict.pop("train_set_logits")
                     )
-
-                # Saving twice at the end of three epochs
-                # because the final classifier uses the saved models without epoch numbers,
-                # and I also want to save the models with epoch numbers in them for better trackability.
-                with open(
-                    os.path.join(pattern_iter_output_dir, "results.txt"), "w"
-                ) as fh:
-                    fh.write(str(results_dict))
-
-                logger.info(
-                    "Saving trained model at {}...".format(pattern_iter_output_dir)
-                )
-                wrapper.save(pattern_iter_output_dir)
-                train_config.save(
-                    os.path.join(pattern_iter_output_dir, "train_config.json")
-                )
-                eval_config.save(
-                    os.path.join(pattern_iter_output_dir, "eval_config.json")
-                )
-                logger.info("Saving complete")
-                logger.info("Time: {}".format(time.ctime()))
 
                 if save_unlabeled_logits:
                     start_time = time.time()
@@ -671,19 +657,6 @@ def train_pet_ensemble(
 
     if do_eval:
         logger.info("=== OVERALL RESULTS ===")
-
-        # # TODO: Comment out this chunk once recovers result_test.txt
-        # if len(results.keys()) == 0:
-        #     # collect results from results.json in each pX-iX folder
-        #     for pattern_id in pattern_ids:
-        #         for iteration in range(repetitions):
-        #             pattern_iter_output_dir = "{}/p{}-i{}".format(output_dir, pattern_id, iteration)
-        #             with open(os.path.join(pattern_iter_output_dir, 'results.json'), 'r') as result_file:
-        #                 result_data = json.load(result_file)
-        #                 # need to update metric name if we use other
-        #                 value = result_data['test_set_after_training']['acc']
-        #                 results['acc'][pattern_id].append(value)
-
         if len(results.keys()) != 0:
             _write_results(os.path.join(output_dir, "result_test.txt"), results)
     else:
@@ -700,6 +673,7 @@ def train_single_model(
     return_train_set_results: bool = True,
     pattern_iter_output_dir: str = None,
     return_train_set_logits: bool = False,
+    eval_data=None,
 ):
     """
     Train a single model.
@@ -765,6 +739,9 @@ def train_single_model(
             pattern_iter_output_dir=pattern_iter_output_dir,
             train_config=config,
             eval_config=eval_config,
+            sc_eval_during_train=config.sc_eval_during_train,
+            sc_eval_steps=config.sc_eval_steps,
+            eval_data=eval_data,
         )
         results_dict["global_step"] = global_step
         results_dict["average_loss"] = tr_loss
