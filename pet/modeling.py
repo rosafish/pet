@@ -389,6 +389,7 @@ def train_pet(
         merge_logits(output_dir, logits_file, reduction, "eval")
         logits = LogitsList.load(logits_file).logits
         assert len(logits) == len(eval_data)
+        logger.info("Logits len: {}, eval data len: {}".format(len(logits), len(eval_data)))
         logger.info("Got {} logits from file {}".format(len(logits), logits_file))
 
         # 2. compute accuracy and store it
@@ -578,6 +579,16 @@ def train_pet_ensemble(
                         eval_data=eval_data
                     )
                 )
+
+                # Saving because the final classifier uses the saved models
+                with open(os.path.join(pattern_iter_output_dir, 'results.txt'), 'w') as fh:
+                    fh.write(str(results_dict))
+                logger.info("Saving trained model at {}...".format(pattern_iter_output_dir))
+                wrapper.save(pattern_iter_output_dir)
+                train_config.save(os.path.join(pattern_iter_output_dir, 'train_config.json'))
+                eval_config.save(os.path.join(pattern_iter_output_dir, 'eval_config.json'))
+                logger.info("Saving complete")
+                logger.info("Time: {}".format(time.ctime()))
 
                 if save_train_logits:
                     logger.info("Saving training logits")
@@ -919,7 +930,6 @@ def merge_logits_lists(
            training.
     :return: the merged list
     """
-
     assert len(set(len(ll.logits) for ll in logits_lists)) == 1
     logits = np.array([ll.logits for ll in logits_lists])
     weights = np.array([ll.score for ll in logits_lists])
