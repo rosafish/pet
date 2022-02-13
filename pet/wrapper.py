@@ -136,17 +136,31 @@ class WrapperConfig(object):
         self.beta_requires_grad = beta_requires_grad
 
 class AdditiveLogitsCombination(nn.Module):
-    def __init__(self, beta=1.0, beta_requires_grad=False):
+    def __init__(self, beta=1.0, beta_requires_grad=False, beta_min=0.0, beta_max=1.0):
         logger.info(f"Initializing combine_logits module with beta={beta} and beta_requires_grad={beta_requires_grad}")
         super().__init__()
-        if beta_requires_grad:
-            self.beta = nn.Parameter(torch.tensor(beta))
-        else:
-            self.beta = beta
+        self.beta = nn.Parameter(torch.tensor(beta), requires_grad=beta_requires_grad)
+        self.beta_min = beta_min
+        self.beta_max = beta_max
 
     def forward(self, logits, calibration_logits):
+        
+        # Doesn't really make sense if beta < 0.0 or beta > 1.0
+        # We could feed beta through a sigmoid, but don't think that's ideal for training
+        # Just clamp between 0.0 and 1.0
+        with torch.no_grad():
+            self.beta.data = torch.clamp(self.beta.data, self.beta_min, self.beta_max)
+        
+        # Add randomly zero all calibration_logits (otherwise no incentive to learn)
+        if self.training:
+            mask = torch.bernoulli(torch.tensor(0.5))
+            calibration_logits = calibration_logits * mask
+
         # When beta = 1, ignores calibration logits
         return logits * self.beta + calibration_logits * (1 - self.beta)
+    
+    def log(self):
+        return {"beta": self.beta.data}
 
 class TransformerModelWrapper:
     """A wrapper around a Transformer-based language model."""
@@ -274,9 +288,9 @@ class TransformerModelWrapper:
         optimizer_grouped_parameters = [
             {'params': [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
              'weight_decay': weight_decay},
-            {'params': [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)] +
-             [p for p in self.combine_logits.parameters()],
-             'weight_decay': 0.0}
+            {'params': [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0},
+            {'params': [p for p in self.combine_logits.parameters()], 'lr' : 2e-3, 'weight_decay': 0.0}
         ]
 
         optimizer = AdamW(optimizer_grouped_parameters, lr=learning_rate, eps=adam_epsilon)
@@ -298,6 +312,8 @@ class TransformerModelWrapper:
             epoch_iterator = tqdm(train_dataloader, desc="Iteration")
             for _, batch in enumerate(epoch_iterator):
                 self.model.train()
+                self.combine_logits.train()
+
                 unlabeled_batch = None
 
                 batch = {k: t.to(device) for k, t in batch.items()}
@@ -329,11 +345,8 @@ class TransformerModelWrapper:
                     loss = loss / gradient_accumulation_steps
 
                 loss.backward()
-
-                try:
-                    wandb.log({'beta' : self.combine_logits.beta})
-                except:
-                    pass
+                
+                wandb.log(self.combine_logits.log())
 
                 tr_loss += loss.item()
                 if (step + 1) % gradient_accumulation_steps == 0:
@@ -414,6 +427,8 @@ class TransformerModelWrapper:
 
         for batch in tqdm(eval_dataloader, desc="Evaluating"):
             self.model.eval()
+            self.combine_logits.eval()
+            
 
             batch = {k: t.to(device) for k, t in batch.items()}
             labels = batch['labels']
@@ -537,6 +552,7 @@ class TransformerModelWrapper:
             prediction_scores = self.combine_logits(prediction_scores, calibration_logits)
 
         loss = nn.CrossEntropyLoss()(prediction_scores.view(-1, len(self.config.label_list)), labels.view(-1))
+
         wandb.log({"cls_loss" : loss})
         if lm_training:
             lm_inputs = self.generate_default_inputs(unlabeled_batch)
